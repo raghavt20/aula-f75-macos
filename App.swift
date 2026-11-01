@@ -109,61 +109,6 @@ final class Engine: ObservableObject {
         if args.contains("--led-read") {
             DispatchQueue.global().async { _ = self.kb.backupLEDProfile() }
         }
-        if let i = args.firstIndex(of: "--led-set"), i + 1 < args.count, let id = UInt8(args[i + 1]) {
-            DispatchQueue.global().async {
-                _ = self.kb.setOnboardEffect(id)
-                usleep(300_000)
-                if self.kb.link == .usb, let p = self.kb.readLEDProfile() { log("read back byte10=\(p[10])") }
-            }
-        }
-        if args.contains("--rate-test") {
-            // Measure how many wireless frames/packets per second the current link sustains.
-            DispatchQueue.global().async {
-                for packets in [1, 2, 4] {
-                    self.kb.wirelessPackets = packets
-                    var n = 0
-                    let t0 = Date()
-                    while Date().timeIntervalSince(t0) < 3 {
-                        var f = solidFrame(0, 0, 0)
-                        for k in keys.shuffled().prefix(packets * 14 / 2) { f[k.led * 3 + 2] = 255; f[k.led * 3] = 255 }
-                        if self.kb.send(f) { n += 1 }
-                    }
-                    let fps = Double(n) / Date().timeIntervalSince(t0)
-                    log(String(format: "rate-test link=%@ packets/frame=%d -> %.1f frames/s (%.0f packets/s)",
-                               self.kb.link?.rawValue ?? "-", packets, fps, fps * Double(packets)))
-                }
-                self.kb.clear()
-                self.kb.wirelessPackets = Int(self.wirelessPackets)
-            }
-        }
-        if args.contains("--overlay-test") {
-            // Built-in Rainbow wheel in the background, then stream only W A S D in red for 8 s.
-            DispatchQueue.global().async {
-                let before = self.kb.link == .usb ? self.kb.readLEDProfile()?[10] : nil
-                if let i = args.firstIndex(of: "--overlay-test"), i + 1 < args.count, let off = Int(args[i + 1]) {
-                    self.kb.wirelessLedOffset = off
-                    log("overlay-test: wireless led offset \(off)")
-                } else {
-                    log("overlay-test: set onboard Rainbow wheel -> \(self.kb.setOnboardEffect(13))")
-                }
-                sleep(3)
-                var f = solidFrame(0, 0, 0)
-                let wasd = keys.filter { ["W", "A", "S", "D"].contains($0.name) }
-                for k in wasd { f[k.led * 3] = 255 }
-                log("overlay-test: streaming WASD red")
-                let t0 = Date()
-                while Date().timeIntervalSince(t0) < 8 { _ = self.kb.send(f); usleep(50_000) }
-                self.kb.clear()
-                log("overlay-test: done (onboard effect stays Rainbow wheel; was \(before.map(String.init) ?? "?"))")
-            }
-        }
-        if args.contains("--autostart") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
-        }
-        for (n, label) in [(NSApplication.didResignActiveNotification, "app -> background"),
-                           (NSApplication.didBecomeActiveNotification, "app -> foreground")] {
-            NotificationCenter.default.addObserver(forName: n, object: nil, queue: .main) { _ in log(label) }
-        }
         if args.contains("--led-restore") {
             DispatchQueue.global().async { log("restore -> \(self.kb.restoreLEDProfile())") }
         }
@@ -230,7 +175,9 @@ final class Engine: ObservableObject {
                 self.applyingOnboard = false
                 if ok { self.onboardEffect = id }
                 self.status = ok ? "Keyboard is now running its built-in “\(name)” effect. Start lighting again to switch back to the app's effects."
-                                 : "Couldn't change the built-in effect (see ~/Library/Logs/F75Music.log)."
+                                 : (self.link == .bluetooth
+                                    ? "Couldn't change the built-in effect. Connect once with the USB cable or 2.4 GHz dongle so the app can save your lighting profile, then try again over Bluetooth."
+                                    : "Couldn't change the built-in effect (see ~/Library/Logs/F75Music.log).")
             }
         }
     }
@@ -239,7 +186,7 @@ final class Engine: ObservableObject {
     private func refreshOnboard() {
         guard link == .usb || link == .dongle else { return }
         DispatchQueue.global().async {
-            guard let p = self.kb.readLEDProfile(), p.count == 128 else { return }
+            guard let p = self.kb.backupLEDProfile(), p.count == 128 else { return }
             DispatchQueue.main.async { self.onboardEffect = Int(p[10]); self.onboardChoice = Int(p[10]) }
         }
     }
@@ -323,16 +270,11 @@ final class Engine: ObservableObject {
         if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil }
     }
 
-    private var tickStat = 0, tickSince = Date(), pressStat = 0
-
     // runs on `queue` every 20 ms
     private func frame() {
-        tickStat += 1
-        if Date().timeIntervalSince(tickSince) >= 2 { tickStat = 0; pressStat = 0; tickSince = Date() }
         settingsLock.lock(); let s = settings; settingsLock.unlock()
         var f = extractor.update(db: analyzer.bands(Engine.bandCount), gain: s.gain)
         f.presses = keyWatcher.drain()
-        pressStat += f.presses.count
         hue += 0.0015 * s.speed
         let ctx = LayerContext(palette: s.palette, mono: s.mono, speed: s.speed, hue: hue, wireless: kb.link == .bluetooth)
         let colors = mixer.render(f, layers: Array(s.layers), levels: s.layerLevels, context: ctx)

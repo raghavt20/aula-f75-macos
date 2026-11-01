@@ -280,7 +280,7 @@ final class F75 {
         for i in 0..<n {
             let p = wirelessPacket(cmd: 0x04, count: n, index: i, sub: 0, chunk: profile[(i * 14)..<min(128, i * 14 + 14)])
             guard IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, 0x13, p, p.count) == kIOReturnSuccess else { return false }
-            if let ack = nextInput(timeout: 0.5) { log("ack: " + ack.map { String(format: "%02x", $0) }.joined(separator: " ")) }
+            _ = nextInput(timeout: 0.5)   // wait for the keyboard's acknowledgement
             usleep(15_000)
         }
         return true
